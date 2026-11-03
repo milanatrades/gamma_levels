@@ -1,0 +1,41 @@
+name: Gamma levels
+
+on:
+  schedule:
+    # Mon–Fri: every 20 minutes from 12:00 to 21:40 UTC
+    # (before the US open and through the whole session; GitHub may start a run a few minutes late)
+    - cron: "*/20 12-21 * * 1-5"
+  workflow_dispatch: {}      # the "Run workflow" button for a manual run
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gamma-levels
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compute levels
+        run: python gamma_levels.py
+
+      - name: Publish levels.json
+        run: |
+          git config user.name "gamma-levels-bot"
+          git config user.email "gamma-levels-bot@users.noreply.github.com"
+          git add levels.json
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "levels $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
