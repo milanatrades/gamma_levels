@@ -73,12 +73,30 @@ def parse_ts(ts):
     return dt.timestamp() * 1000
 
 
+def parse_ny(ts):
+    """last_trade_time of the index: New York time when it carries no zone."""
+    s = str(ts).strip().replace(" ", "T")
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=NY)
+    return dt.timestamp() * 1000
+
+
 def compute(raw):
     d = raw.get("data", raw)
     spot = float(d.get("current_price") or d.get("close") or 0)
     if spot <= 0:
         raise RuntimeError("no index price in the file")
     now = parse_ts(raw.get("timestamp")) if raw.get("timestamp") else time.time() * 1000
+    # when the index price was set: outside the session it is the last close, not the time of the download
+    spot_ts = None
+    try:
+        if d.get("last_trade_time"):
+            spot_ts = int(parse_ny(d["last_trade_time"]))
+            if spot_ts > now + 3600e3:      # a bad zone guess would put it in the future
+                spot_ts = None
+    except Exception:
+        spot_ts = None
     opts = []
     for x in d.get("options", []):
         m = SYM.search(str(x.get("option", "")))
@@ -143,7 +161,7 @@ def compute(raw):
     asof_ny = datetime.fromtimestamp(now / 1000, NY)
     num = lambda v: None if v is None else (int(v) if float(v).is_integer() else round(v, 2))
     return {
-        "spot": round(spot, 2), "asof": int(now), "date": asof_ny.strftime("%Y-%m-%d"),
+        "spot": round(spot, 2), "spot_ts": spot_ts, "asof": int(now), "date": asof_ny.strftime("%Y-%m-%d"),
         "cw": num(cw), "g0": None if g0 is None else round(g0), "pw": num(pw),
         "cw_g": num(cw_g), "pw_g": num(pw_g), "n": len(opts),
     }
