@@ -12,6 +12,14 @@ Same formulas as the "Гамма-уровни NDX" calculator:
               (pw_g: the largest put GEX instead)
   Gamma 0   = price where the total gamma of all options changes sign,
               gamma recomputed with Black-Scholes and each option's IV
+Intraday sets (key "sets" of each index), expirations picked automatically:
+  0dte = the nearest expiration that has not expired yet (today until 16:00 NY,
+         then the next one)
+  week = every expiration up to the Friday of that week
+  For these sets the walls are the largest call / put GEX within +-5% of spot,
+  Gamma 0 is computed from these options only, and "ladder" lists the strikes
+  with the largest net GEX within +-3% of spot (strike, net GEX in $bn).
+  The top-level cw / g0 / pw stay as before (all expirations).
 Only the Python standard library is used.
 """
 import json
@@ -33,6 +41,8 @@ SQ2PI = math.sqrt(2 * math.pi)
 SYM = re.compile(r"(\d{6})([CP])(\d{8})$")
 WALL_BAND = 0.10                   # walls are searched within +-10% of spot
 GRID_LO, GRID_HI, GRID_N = 0.85, 1.15, 150
+INTRA_BAND = 0.05                  # intraday walls: within +-5% of spot
+LADDER_BAND, LADDER_N = 0.03, 6    # intraday ladder: top strikes within +-3%
 
 
 def fetch(index):
@@ -107,6 +117,7 @@ def compute(raw):
         if ex < now - 3600e3 or oi <= 0:
             continue
         opts.append({
+            "ex": ex,
             "k": int(m.group(3)) / 1000, "c": m.group(2) == "C", "oi": oi,
             "g": float(x.get("gamma") or 0), "iv": max(float(x.get("iv") or 0), 0.0),
             "t": max((ex - now) / YEAR_MS, 1 / 8760),
@@ -164,7 +175,76 @@ def compute(raw):
         "spot": round(spot, 2), "spot_ts": spot_ts, "asof": int(now), "date": asof_ny.strftime("%Y-%m-%d"),
         "cw": num(cw), "g0": None if g0 is None else round(g0), "pw": num(pw),
         "cw_g": num(cw_g), "pw_g": num(pw_g), "n": len(opts),
+        "sets": intraday_sets(opts, spot, now),
     }
+
+
+def ny_date(ms):
+    return datetime.fromtimestamp(ms / 1000, NY).date()
+
+
+def level_set(opts, spot):
+    """Walls by GEX within INTRA_BAND, walls by OI, Gamma 0 and the ladder for a subset of options."""
+    mult = 100 * spot * spot * 0.01
+    by_k = {}
+    for o in opts:
+        g = o["g"] if o["g"] > 0 else bs_gamma(spot, o["k"], o["t"], o["iv"])
+        v = g * o["oi"] * mult
+        e = by_k.setdefault(o["k"], {"c": 0.0, "p": 0.0, "co": 0.0, "po": 0.0})
+        if o["c"]:
+            e["c"] += v; e["co"] += o["oi"]
+        else:
+            e["p"] -= v; e["po"] += o["oi"]
+
+    def best(key, above, sign=1):
+        cand = [(sign * by_k[k][key], k) for k in by_k
+                if abs(k - spot) / spot <= INTRA_BAND and ((k >= spot) if above else (k <= spot))]
+        cand = [c for c in cand if c[0] > 0]
+        return max(cand)[1] if cand else None
+
+    with_iv = [o for o in opts if o["iv"] > 0]
+    g0, bestd, prev = None, float("inf"), None
+    for i in range(GRID_N + 1):
+        x = spot * (0.95 + 0.10 * i / GRID_N)
+        tot = 0.0
+        for o in with_iv:
+            g = bs_gamma(x, o["k"], o["t"], o["iv"]) * o["oi"]
+            tot += g if o["c"] else -g
+        if prev and ((prev[1] <= 0 < tot) or (prev[1] >= 0 > tot)):
+            z = prev[0] + (x - prev[0]) * (0 - prev[1]) / (tot - prev[1])
+            if abs(z - spot) < bestd:
+                bestd, g0 = abs(z - spot), z
+        prev = (x, tot)
+
+    ladder = sorted(((k, e["c"] + e["p"]) for k, e in by_k.items() if abs(k - spot) / spot <= LADDER_BAND),
+                    key=lambda kv: -abs(kv[1]))[:LADDER_N]
+    num = lambda v: None if v is None else (int(v) if float(v).is_integer() else round(v, 2))
+    return {
+        "cw": num(best("c", True)), "pw": num(best("p", False, -1)),
+        "g0": None if g0 is None else round(g0),
+        "cw_oi": num(best("co", True)), "pw_oi": num(best("po", False)),
+        "ladder": [[num(k), round(v / 1e9, 3)] for k, v in sorted(ladder)],
+        "n": len(opts),
+    }
+
+
+def intraday_sets(opts, spot, now):
+    alive = sorted({o["ex"] for o in opts if o["ex"] > now})
+    if not alive:
+        return {}
+    first = alive[0]
+    d = ny_date(first)
+    fri = d.toordinal() + (4 - d.weekday()) % 7          # Friday of that week
+    week_exp = [e for e in alive if ny_date(e).toordinal() <= fri]
+    out = {}
+    for name, exps in (("0dte", [first]), ("week", week_exp)):
+        sub = [o for o in opts if o["ex"] in exps]
+        if sub:
+            r = level_set(sub, spot)
+            r["exp"] = ny_date(exps[0]).isoformat()
+            r["exp_last"] = ny_date(exps[-1]).isoformat()
+            out[name] = r
+    return out
 
 
 def main():
