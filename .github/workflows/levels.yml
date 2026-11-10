@@ -2,9 +2,9 @@ name: Gamma levels
 
 on:
   schedule:
-    # Mon–Fri: every 20 minutes from 12:00 to 21:40 UTC
-    # (before the US open and through the whole session; GitHub may start a run a few minutes late)
-    - cron: "*/20 12-21 * * 1-5"
+    # Mon–Fri: every 20 minutes from 06:00 to 21:40 UTC
+    # (from before the London open, through the whole US session; GitHub may start a run a few minutes late)
+    - cron: "*/20 6-21 * * 1-5"
   workflow_dispatch: {}      # the "Run workflow" button for a manual run
 
 permissions:
