@@ -20,6 +20,11 @@ Intraday sets (key "sets" of each index), expirations picked automatically:
   Gamma 0 is computed from these options only, and "ladder" lists the strikes
   with the largest net GEX within +-3% of spot (strike, net GEX in $bn).
   The top-level cw / g0 / pw stay as before (all expirations).
+Expected move (keys "em" and "em_iv" of each index), in index points:
+  em    = price of the at-the-money straddle of the nearest expiration
+          (call + put at the strike closest to spot, mid of bid/ask): the move
+          the market pays for until that expiration
+  em_iv = spot x IV of those two options / sqrt(252): the same for one full day
 History (key "history" -> index -> New York date): snapshots of that day that
 are never rewritten, so a chart can show each past day with its own levels:
   am   = the first run of the day (before London)
@@ -127,6 +132,8 @@ def compute(raw):
             "k": int(m.group(3)) / 1000, "c": m.group(2) == "C", "oi": oi,
             "g": float(x.get("gamma") or 0), "iv": max(float(x.get("iv") or 0), 0.0),
             "t": max((ex - now) / YEAR_MS, 1 / 8760),
+            "bid": float(x.get("bid") or 0), "ask": float(x.get("ask") or 0),
+            "theo": float(x.get("theo") or 0),
         })
     if not opts:
         raise RuntimeError("no options with open interest")
@@ -182,7 +189,34 @@ def compute(raw):
         "cw": num(cw), "g0": None if g0 is None else round(g0), "pw": num(pw),
         "cw_g": num(cw_g), "pw_g": num(pw_g), "n": len(opts),
         "sets": intraday_sets(opts, spot, now),
+        **expected_move(opts, spot, now),
     }
+
+
+def expected_move(opts, spot, now):
+    """At-the-money straddle of the nearest expiration: {"em", "em_iv", "em_k"} or {}."""
+    alive = sorted({o["ex"] for o in opts if o["ex"] > now})
+    if not alive:
+        return {}
+    sub = [o for o in opts if o["ex"] == alive[0]]
+    calls = {o["k"]: o for o in sub if o["c"]}
+    puts = {o["k"]: o for o in sub if not o["c"]}
+    ks = sorted((k for k in calls if k in puts), key=lambda k: abs(k - spot))
+    if not ks:
+        return {}
+
+    def mid(o):
+        if o["bid"] > 0 and o["ask"] >= o["bid"]:
+            return (o["bid"] + o["ask"]) / 2
+        return o["theo"] if o["theo"] > 0 else None
+
+    k = ks[0]
+    c, p = mid(calls[k]), mid(puts[k])
+    ivs = [o["iv"] for o in (calls[k], puts[k]) if o["iv"] > 0]
+    out = {"em_k": int(k) if float(k).is_integer() else round(k, 2)}
+    out["em"] = round(c + p, 1) if c is not None and p is not None else None
+    out["em_iv"] = round(spot * (sum(ivs) / len(ivs)) / math.sqrt(252), 1) if ivs else None
+    return out
 
 
 def ny_date(ms):
@@ -255,7 +289,7 @@ def intraday_sets(opts, spot, now):
 
 def snapshot(r):
     """The part of an index result worth keeping for a past day."""
-    keep = ("asof", "spot", "spot_ts", "cw", "g0", "pw", "cw_g", "pw_g")
+    keep = ("asof", "spot", "spot_ts", "cw", "g0", "pw", "cw_g", "pw_g", "em", "em_iv", "em_k")
     snap = {k: r.get(k) for k in keep}
     snap["sets"] = {name: {k: v.get(k) for k in ("cw", "g0", "pw", "exp", "exp_last")}
                     for name, v in (r.get("sets") or {}).items()}
