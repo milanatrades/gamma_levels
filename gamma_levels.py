@@ -20,6 +20,11 @@ Intraday sets (key "sets" of each index), expirations picked automatically:
   Gamma 0 is computed from these options only, and "ladder" lists the strikes
   with the largest net GEX within +-3% of spot (strike, net GEX in $bn).
   The top-level cw / g0 / pw stay as before (all expirations).
+History (key "history" -> index -> New York date): snapshots of that day that
+are never rewritten, so a chart can show each past day with its own levels:
+  am   = the first run of the day (before London)
+  pm   = the first run after the index traded past 09:30 New York
+  last = the latest run of the day (updated until the day ends)
 Only the Python standard library is used.
 """
 import json
@@ -41,6 +46,7 @@ SQ2PI = math.sqrt(2 * math.pi)
 SYM = re.compile(r"(\d{6})([CP])(\d{8})$")
 WALL_BAND = 0.10                   # walls are searched within +-10% of spot
 GRID_LO, GRID_HI, GRID_N = 0.85, 1.15, 150
+HISTORY_DAYS = 400                 # how many days of snapshots to keep
 INTRA_BAND = 0.05                  # intraday walls: within +-5% of spot
 LADDER_BAND, LADDER_N = 0.03, 6    # intraday ladder: top strikes within +-3%
 
@@ -247,6 +253,32 @@ def intraday_sets(opts, spot, now):
     return out
 
 
+def snapshot(r):
+    """The part of an index result worth keeping for a past day."""
+    keep = ("asof", "spot", "spot_ts", "cw", "g0", "pw", "cw_g", "pw_g")
+    snap = {k: r.get(k) for k in keep}
+    snap["sets"] = {name: {k: v.get(k) for k in ("cw", "g0", "pw", "exp", "exp_last")}
+                    for name, v in (r.get("sets") or {}).items()}
+    return snap
+
+
+def add_history(out, index, r):
+    hist = out.setdefault("history", {}).setdefault(index, {})
+    day = r["date"]
+    h = hist.setdefault(day, {})
+    snap = snapshot(r)
+    if "am" not in h:
+        h["am"] = snap
+    ts = r.get("spot_ts")
+    if "pm" not in h and ts:
+        t = datetime.fromtimestamp(ts / 1000, NY)
+        if t.strftime("%Y-%m-%d") == day and (t.hour, t.minute) >= (9, 30):
+            h["pm"] = snap
+    h["last"] = snap
+    for old in sorted(hist)[:-HISTORY_DAYS]:
+        del hist[old]
+
+
 def main():
     try:
         with open(OUT, encoding="utf-8") as f:
@@ -257,6 +289,7 @@ def main():
     for index in INDEXES:
         try:
             out[index] = compute(fetch(index))
+            add_history(out, index, out[index])
             ok += 1
             print(index, out[index])
         except Exception as e:  # keep the previous levels of this index
